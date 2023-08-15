@@ -9,6 +9,9 @@
 #![feature(ptr_metadata)]
 #![feature(new_uninit)]
 #![feature(maybe_uninit_slice)]
+#![feature(array_chunks)]
+#![feature(slice_as_chunks)]
+#![feature(portable_simd)]
 
 mod algorithms;
 mod bgworker;
