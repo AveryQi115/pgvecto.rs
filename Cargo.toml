@@ -34,12 +34,14 @@ parking_lot = "0.12.1"
 memoffset = "0.9.0"
 serde_json = "1"
 thiserror = "1.0.40"
+tokio = { version = "1", features = ["full"] }
 tempfile = "3.6.0"
 cstr = "0.2.11"
 arrayvec = { version = "0.7.3", features = ["serde"] }
 memmap2 = "0.7.0"
 validator = { version = "0.16.1", features = ["derive"] }
 toml = "0.7.6"
+futures = "0.3.27"
 
 [dev-dependencies]
 pgrx-tests = { git = "https://github.com/tensorchord/pgrx.git", rev = "c0d11a8b78b0d707a5e9106bc4d5f66395ca9a2e" }

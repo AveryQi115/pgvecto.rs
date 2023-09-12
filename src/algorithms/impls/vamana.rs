@@ -12,6 +12,8 @@ use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap, HashSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
+use async_trait::async_trait;
+
 
 pub struct VertexWithDistance {
     pub id: usize,
@@ -109,6 +111,18 @@ impl SearchState {
     }
 }
 
+#[async_trait]
+pub trait AsyncFunc {
+    /// Distance between two vertices, specified by their IDs.
+    async fn distance(&self, a: usize, b: usize) -> Result<Scalar>;
+
+    /// Distance from query vector to a vertex identified by the idx.
+    async fn distance_to(&self, query: &[Scalar], idx: usize) -> Result<Scalar>;
+
+    /// Return the neighbor
+    async fn neighbors(&self, id: usize) -> Result<Arc<[usize]>>;
+}
+
 #[allow(unused)]
 pub struct VamanaImpl<D: DistanceFamily> {
     neighbors: MmapBox<[usize]>,
@@ -123,6 +137,168 @@ pub struct VamanaImpl<D: DistanceFamily> {
 
 unsafe impl<D: DistanceFamily> Send for VamanaImpl<D> {}
 unsafe impl<D: DistanceFamily> Sync for VamanaImpl<D> {}
+
+#[async_trait]
+impl<D: DistanceFamily> AsyncFunc for VamanaImpl<D> {
+    async fn distance(&self, a: usize, b: usize) -> Result<Scalar>{
+        Ok(D::distance(self.vectors.get_vector(a), self.vectors.get_vector(b)));
+    }
+
+    async fn distance_to(&self, query: &[Scalar], idx: usize) -> Result<Scalar>{
+        Ok(D::distance(query, self.vectors.get_vector(idx)));
+    }
+
+    async fn get_neighbors(&self, id: usize) -> Result<Arc<[usize]>>{
+        let size = self.neighbor_size[id];
+        Ok(Arc::new(self.neighbors[(id * self.r)..(id * self.r + size)]))
+    }
+
+    async fn greedy_search(
+        &self,
+        start: usize,
+        query: &[Scalar],
+        k: usize,
+        search_size: usize,
+    ) -> Result<SearchState, VamanaError> {
+        let mut state = SearchState::new(k, search_size);
+
+        let dist = self.distance_to(query, start).await?;
+        state.push(start, dist);
+        while let Some(id) = state.pop() {
+            // only pop id in the search list but not visited
+            state.visit(id);
+
+            let neighbor_ids = self.get_neighbors(id).await?;
+            for &neighbor_id in neighbor_ids {
+                if state.is_visited(neighbor_id) {
+                    continue;
+                }
+
+                let dist = self.distance_to(query, neighbor_id).await?;
+                state.push(neighbor_id, dist); // push and retain closet l nodes
+            }
+        }
+
+        Ok(state)
+    }
+
+    async fn robust_prune(
+        &self,
+        id: usize,
+        mut visited: HashSet<usize>,
+        alpha: f32,
+        r: usize,
+    ) -> Result<Vec<usize>, VamanaError> {
+        visited.remove(&id); // in case visited has id itself
+        let neighbor_ids = self.get_neighbors(id).await?;
+        visited.extend(neighbor_ids.iter());
+
+        let mut heap: BinaryHeap<VertexWithDistance> = visited
+            .iter()
+            .map(|v| {
+                let dist = D::distance(self.vectors.get_vector(id), self.vectors.get_vector(*v));
+                VertexWithDistance {
+                    id: *v,
+                    distance: dist,
+                }
+            })
+            .collect();
+
+        let new_neighbor_ids = tokio::task::spawn_blocking( move || {
+            let mut new_neighbor_ids: Vec<usize> = vec![];
+            while !visited.is_empty() {
+                let mut p = heap.pop().unwrap();
+                while !visited.contains(&p.id) {
+                    p = heap.pop().unwrap();
+                }
+    
+                new_neighbor_ids.push(p.id);
+                if new_neighbor_ids.len() >= r {
+                    break;
+                }
+                let mut to_remove: HashSet<usize> = HashSet::new();
+                for pv in visited.iter() {
+                    let dist_prime =
+                        D::distance(self.vectors.get_vector(p.id), self.vectors.get_vector(*pv));
+                    let dist_query =
+                        D::distance(self.vectors.get_vector(id), self.vectors.get_vector(*pv));
+                    if Scalar::from(alpha) * dist_prime <= dist_query {
+                        to_remove.insert(*pv);
+                    }
+                }
+                for pv in to_remove.iter() {
+                    visited.remove(pv);
+                }
+            }
+            Ok::<_, VamanaError>(new_neighbours)
+        })
+        .await??
+        Ok(new_neighbor_ids)
+    }
+
+    async fn one_pass(
+        &mut self,
+        medoid: usize,
+        alpha: f32,
+        r: usize,
+        l: usize,
+        mut rng: impl Rng,
+    ) -> Result<(), VamanaError> {
+        let len = self.vectors.len();
+        let mut ids = (0..len).collect::<Vec<_>>();
+        ids.shuffle(&mut rng);
+
+        for &id in ids.iter() {
+            let query = self.vectors.get_vector(id);
+            let state = self.greedy_search(medoid, query, 1, l).await?;
+            let neighbor_ids = self.robust_prune(id, state.visited, alpha, l).await?;
+            let neighbor_ids: HashSet<usize> = neighbor_ids.iter().cloned().collect();
+
+            self._set_neighbors(id, &neighbor_ids);
+
+            let neighbor_ids = stream::iter(neighbor_ids)
+            .map(|j| async move {
+                let mut old_neighbors: HashSet<usize> = 
+                    self.get_neighbors(j)
+                    .await?
+                    .values()
+                    .iter()
+                    .map(|v| *v as usize)
+                    .collect();
+                old_neighbors.insert(id);
+                if old_neighbors.len() + 1 > r {
+                    let new_neighbors = self._robust_prune(neighbor_id, old_neighbors, alpha, r).await?;
+                    Ok::<_, Error>((j as usize, new_neighbours))
+                } else {
+                    Ok::<_, Error>((
+                        j as usize,
+                        neighbor_set.iter().map(|n| *n as u32).collect::<Vec<_>>(),
+                    ))
+                }
+            })
+            .buffered(num_cpus::get())
+            .try_collect::<Vec<_>>()
+            .await?;
+
+            for &neighbor_id in neighbor_ids.iter() {
+                let old_neighbors = self.get_neighbors(neighbor_id).await?;
+                let mut old_neighbors: HashSet<usize> = old_neighbors.iter().cloned().collect();
+                old_neighbors.insert(id);
+                if old_neighbors.len() > r {
+                    // need robust prune
+                    let new_neighbors = self._robust_prune(neighbor_id, old_neighbors, alpha, r)?;
+                    let new_neighbors: HashSet<usize> = new_neighbors.iter().cloned().collect();
+                    self._set_neighbors(neighbor_id, &new_neighbors);
+                } else {
+                    self._set_neighbors(neighbor_id, &old_neighbors);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+}
 
 impl<D: DistanceFamily> VamanaImpl<D> {
     pub fn prebuild(
