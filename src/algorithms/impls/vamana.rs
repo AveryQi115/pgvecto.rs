@@ -3,6 +3,8 @@ use crate::bgworker::storage::Storage;
 use crate::bgworker::storage::StoragePreallocator;
 use crate::bgworker::storage_mmap::MmapBox;
 use crate::bgworker::vectors::Vectors;
+use std::fs::OpenOptions;
+use std::io::prelude::*;
 use crate::prelude::*;
 use rayon::prelude::*;
 
@@ -131,7 +133,7 @@ pub struct VamanaImpl {
     alpha: f32,
     l: usize,
     build_threads: usize,
-
+    log: File,
     d: Distance,
 }
 
@@ -165,6 +167,7 @@ impl VamanaImpl {
         memmap: Memmap,
         d: Distance,
     ) -> Result<Self, VamanaError> {
+
         let number_of_nodes = capacity;
         let neighbors = unsafe {
             storage
@@ -178,6 +181,14 @@ impl VamanaImpl {
         };
         let medoid = unsafe { storage.alloc_mmap::<usize>(memmap).assume_init() };
 
+        let file_path = "/home/avery/log.out";
+
+        // Create or open the file with write access
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)  // Create the file if it doesn't exist
+            .open(file_path)?;
+
         let mut new_vamana = Self {
             neighbors,
             neighbor_size,
@@ -188,12 +199,13 @@ impl VamanaImpl {
             alpha,
             l,
             build_threads,
+            log: file,
             d,
         };
 
         // 1. init graph with r random neighbors for each node
         let rng = rand::thread_rng();
-        new_vamana._init_graph(n, rng.clone());
+        new_vamana._init_graph(n, rng.clone())?;
 
         // 2. find medoid
         *new_vamana.medoid = new_vamana._find_medoid(n);
@@ -202,6 +214,8 @@ impl VamanaImpl {
         new_vamana._one_pass(n, 1.0, r, l, rng.clone())?;
 
         new_vamana._one_pass(n, alpha, r, l, rng.clone())?;
+
+        new_vamana.log.write_all(format!("new done\n").as_bytes())?;
 
         Ok(new_vamana)
     }
@@ -335,7 +349,9 @@ impl VamanaImpl {
         Ok(())
     }
 
-    fn _init_graph(&self, n: usize, mut rng: impl Rng) {
+    fn _init_graph(&self, n: usize, mut rng: impl Rng) -> Result<(), VamanaError> {
+        self.log.write_all(format!("init graph begin with n: {}\n", n).as_bytes())?;
+
         let distribution = Uniform::new(0, n);
         for i in 0..n {
             let mut neighbor_ids: HashSet<usize> = HashSet::new();
@@ -355,6 +371,7 @@ impl VamanaImpl {
                 self._set_neighbors(i, &neighbor_ids, &mut guard);
             }
         }
+        Ok(())
     }
 
     fn _set_neighbors(
@@ -392,6 +409,8 @@ impl VamanaImpl {
     }
 
     fn _find_medoid(&self, n: usize) -> usize {
+        self.log.write_all(format!("find medoid begin with n: {}\n", n).as_bytes())?;
+
         let centroid = self._compute_centroid(n);
         let centroid_arr: &[Scalar] = &centroid;
 
@@ -433,6 +452,8 @@ impl VamanaImpl {
         l: usize,
         mut rng: impl Rng,
     ) -> Result<(), VamanaError> {
+        self.log.write_all(format!("One pass begin with {}\n", alpha).as_bytes())?;
+
         let mut ids = (0..n).collect::<Vec<_>>();
         ids.shuffle(&mut rng);
 
