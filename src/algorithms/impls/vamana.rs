@@ -542,7 +542,7 @@ impl VamanaImpl {
                 while !visited.contains(&p.id) {
                     match heap.pop(){
                         Some(value) => {p = value;}
-                        None => {break;}
+                        None => {return Ok(new_neighbor_ids);}
                     }
                 }
                 new_neighbor_ids.push(p.id);
@@ -565,7 +565,7 @@ impl VamanaImpl {
                     visited.remove(pv);
                 }
             } else {
-                break;
+                return Ok(new_neighbor_ids);
             }
         }
         Ok(new_neighbor_ids)
