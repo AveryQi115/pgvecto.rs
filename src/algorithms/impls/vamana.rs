@@ -3,11 +3,9 @@ use crate::bgworker::storage::Storage;
 use crate::bgworker::storage::StoragePreallocator;
 use crate::bgworker::storage_mmap::MmapBox;
 use crate::bgworker::vectors::Vectors;
-use std::fs::OpenOptions;
-use std::fs::File;
-use std::io::Write;
 use crate::prelude::*;
 use rayon::prelude::*;
+use std::fs;
 
 use crossbeam::atomic::AtomicCell;
 use parking_lot::RwLock;
@@ -134,7 +132,6 @@ pub struct VamanaImpl {
     alpha: f32,
     l: usize,
     build_threads: usize,
-    log: File,
     d: Distance,
 }
 
@@ -168,7 +165,6 @@ impl VamanaImpl {
         memmap: Memmap,
         d: Distance,
     ) -> Result<Self, VamanaError> {
-
         let number_of_nodes = capacity;
         let neighbors = unsafe {
             storage
@@ -185,10 +181,13 @@ impl VamanaImpl {
         let file_path = "/home/avery/log.out";
 
         // Create or open the file with write access
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)  // Create the file if it doesn't exist
-            .open(file_path).expect("cannot open file in new");
+        {
+            let file = OpenOptions::new()
+                .write(true)
+                .create(true) // Create the file if it doesn't exist
+                .open(file_path)
+                .expect("cannot open file in new");
+        }
 
         let mut new_vamana = Self {
             neighbors,
@@ -200,27 +199,42 @@ impl VamanaImpl {
             alpha,
             l,
             build_threads,
-            log: file,
             d,
         };
 
         // 1. init graph with r random neighbors for each node
         let rng = rand::thread_rng();
-        new_vamana.log.write_all(format!("init graph begin with n: {}\n", n).as_bytes()).expect("cannot write");
+        fs::write(
+            "/home/avery/log.out",
+            format!("init graph begin with n: {}\n", n),
+        )
+        .expect("cannot write");
         new_vamana._init_graph(n, rng.clone())?;
 
         // 2. find medoid
-        new_vamana.log.write_all(format!("find medoid begin with n: {}\n", n).as_bytes()).expect("cannot write");
+        fs::write(
+            "/home/avery/log.out",
+            format!("find medoid begin with n: {}\n", n),
+        )
+        .expect("cannot write");
         *new_vamana.medoid = new_vamana._find_medoid(n);
 
         // 3. iterate pass
-        new_vamana.log.write_all(format!("One pass begin with {}\n", 1.0).as_bytes()).expect("cannot write");
+        fs::write(
+            "/home/avery/log.out",
+            format!("One pass begin with {}\n", 1.0),
+        )
+        .expect("cannot write");
         new_vamana._one_pass(n, 1.0, r, l, rng.clone())?;
 
-        new_vamana.log.write_all(format!("One pass begin with {}\n", alpha).as_bytes()).expect("cannot write");
+        fs::write(
+            "/home/avery/log.out",
+            format!("One pass begin with {}\n", alpha),
+        )
+        .expect("cannot write");
         new_vamana._one_pass(n, alpha, r, l, rng.clone())?;
 
-        new_vamana.log.write_all(format!("new done\n").as_bytes()).expect("cannot write");
+        fs::write("/home/avery/log.out", format!("new done\n")).expect("cannot write");
 
         Ok(new_vamana)
     }
@@ -249,13 +263,6 @@ impl VamanaImpl {
                 .assume_init()
         };
         let medoid = unsafe { storage.alloc_mmap::<usize>(memmap).assume_init() };
-        let file_path = "/home/avery/log.out";
-
-        // Create or open the file with write access
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)  // Create the file if it doesn't exist
-            .open(file_path).expect("cannot open file in load");
 
         Ok(Self {
             neighbors,
@@ -267,7 +274,6 @@ impl VamanaImpl {
             alpha,
             l,
             build_threads,
-            log:file,
             d,
         })
     }
@@ -364,7 +370,6 @@ impl VamanaImpl {
     }
 
     fn _init_graph(&self, n: usize, mut rng: impl Rng) -> Result<(), VamanaError> {
-
         let distribution = Uniform::new(0, n);
         for i in 0..n {
             let mut neighbor_ids: HashSet<usize> = HashSet::new();
@@ -422,7 +427,6 @@ impl VamanaImpl {
     }
 
     fn _find_medoid(&self, n: usize) -> usize {
-
         let centroid = self._compute_centroid(n);
         let centroid_arr: &[Scalar] = &centroid;
 
@@ -464,7 +468,6 @@ impl VamanaImpl {
         l: usize,
         mut rng: impl Rng,
     ) -> Result<(), VamanaError> {
-
         let mut ids = (0..n).collect::<Vec<_>>();
         ids.shuffle(&mut rng);
 
@@ -483,14 +486,29 @@ impl VamanaImpl {
         l: usize,
     ) -> Result<(), VamanaError> {
         let query = self.vectors.get_vector(id);
-        let mut state = self._greedy_search(*self.medoid, query, 1, l)?;
+        let mut state = self
+            ._greedy_search(*self.medoid, query, 1, l)
+            .unwrap_or_else(|e| {
+                fs::write(
+                    "/home/avery/log.out",
+                    format!("greedy search fail: {}\n", e),
+                )
+                .expect("cannot write")
+            });
         state.visited.remove(&id); // in case visited has id itself
         let mut new_neighbor_ids: HashSet<usize> = HashSet::new();
         {
             let mut guard = self.neighbor_size[id].write();
             let neighbor_ids = self._get_neighbors_with_write_guard(id, &guard);
             state.visited.extend(neighbor_ids.iter().map(|x| x.load()));
-            let neighbor_ids = self._robust_prune(id, state.visited, alpha, l)?;
+            let neighbor_ids = self._robust_prune(id, state.visited, alpha, l)
+                .unwrap_or_else(|e| {
+                    fs::write(
+                        "/home/avery/log.out",
+                        format!("robust prune fail: {}\n", e),
+                    )
+                    .expect("cannot write")
+                });
             let neighbor_ids: HashSet<usize> = neighbor_ids.into_iter().collect();
             self._set_neighbors(id, &neighbor_ids, &mut guard);
             new_neighbor_ids = neighbor_ids;
@@ -505,7 +523,14 @@ impl VamanaImpl {
                 old_neighbors.insert(id);
                 if old_neighbors.len() > r {
                     // need robust prune
-                    let new_neighbors = self._robust_prune(neighbor_id, old_neighbors, alpha, r)?;
+                    let new_neighbors = self._robust_prune(neighbor_id, old_neighbors, alpha, r)
+                        .unwrap_or_else(|e| {
+                            fs::write(
+                                "/home/avery/log.out",
+                                format!("robust prune fail: {}\n", e),
+                            )
+                            .expect("cannot write")
+                        });
                     let new_neighbors: HashSet<usize> = new_neighbors.into_iter().collect();
                     self._set_neighbors(neighbor_id, &new_neighbors, &mut guard);
                 } else {
@@ -572,9 +597,13 @@ impl VamanaImpl {
         while !visited.is_empty() {
             if let Some(mut p) = heap.pop() {
                 while !visited.contains(&p.id) {
-                    match heap.pop(){
-                        Some(value) => {p = value;}
-                        None => {return Ok(new_neighbor_ids);}
+                    match heap.pop() {
+                        Some(value) => {
+                            p = value;
+                        }
+                        None => {
+                            return Ok(new_neighbor_ids);
+                        }
                     }
                 }
                 new_neighbor_ids.push(p.id);
