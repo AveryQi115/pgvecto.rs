@@ -11,7 +11,6 @@ use thiserror::Error;
 
 #[derive(Debug, Clone, Error, Serialize, Deserialize)]
 pub enum VamanaError {
-    //
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

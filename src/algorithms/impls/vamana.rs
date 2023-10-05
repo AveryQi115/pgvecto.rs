@@ -4,7 +4,8 @@ use crate::bgworker::storage::StoragePreallocator;
 use crate::bgworker::storage_mmap::MmapBox;
 use crate::bgworker::vectors::Vectors;
 use std::fs::OpenOptions;
-use std::io::prelude::*;
+use std::fs::File;
+use std::io::Write;
 use crate::prelude::*;
 use rayon::prelude::*;
 
@@ -184,10 +185,10 @@ impl VamanaImpl {
         let file_path = "/home/avery/log.out";
 
         // Create or open the file with write access
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .write(true)
             .create(true)  // Create the file if it doesn't exist
-            .open(file_path)?;
+            .open(file_path).expect("cannot open file in new");
 
         let mut new_vamana = Self {
             neighbors,
@@ -205,17 +206,21 @@ impl VamanaImpl {
 
         // 1. init graph with r random neighbors for each node
         let rng = rand::thread_rng();
+        new_vamana.log.write_all(format!("init graph begin with n: {}\n", n).as_bytes()).expect("cannot write");
         new_vamana._init_graph(n, rng.clone())?;
 
         // 2. find medoid
+        new_vamana.log.write_all(format!("find medoid begin with n: {}\n", n).as_bytes()).expect("cannot write");
         *new_vamana.medoid = new_vamana._find_medoid(n);
 
         // 3. iterate pass
+        new_vamana.log.write_all(format!("One pass begin with {}\n", 1.0).as_bytes()).expect("cannot write");
         new_vamana._one_pass(n, 1.0, r, l, rng.clone())?;
 
+        new_vamana.log.write_all(format!("One pass begin with {}\n", alpha).as_bytes()).expect("cannot write");
         new_vamana._one_pass(n, alpha, r, l, rng.clone())?;
 
-        new_vamana.log.write_all(format!("new done\n").as_bytes())?;
+        new_vamana.log.write_all(format!("new done\n").as_bytes()).expect("cannot write");
 
         Ok(new_vamana)
     }
@@ -244,6 +249,14 @@ impl VamanaImpl {
                 .assume_init()
         };
         let medoid = unsafe { storage.alloc_mmap::<usize>(memmap).assume_init() };
+        let file_path = "/home/avery/log.out";
+
+        // Create or open the file with write access
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)  // Create the file if it doesn't exist
+            .open(file_path).expect("cannot open file in load");
+
         Ok(Self {
             neighbors,
             neighbor_size,
@@ -254,6 +267,7 @@ impl VamanaImpl {
             alpha,
             l,
             build_threads,
+            log:file,
             d,
         })
     }
@@ -350,7 +364,6 @@ impl VamanaImpl {
     }
 
     fn _init_graph(&self, n: usize, mut rng: impl Rng) -> Result<(), VamanaError> {
-        self.log.write_all(format!("init graph begin with n: {}\n", n).as_bytes())?;
 
         let distribution = Uniform::new(0, n);
         for i in 0..n {
@@ -409,7 +422,6 @@ impl VamanaImpl {
     }
 
     fn _find_medoid(&self, n: usize) -> usize {
-        self.log.write_all(format!("find medoid begin with n: {}\n", n).as_bytes())?;
 
         let centroid = self._compute_centroid(n);
         let centroid_arr: &[Scalar] = &centroid;
@@ -452,7 +464,6 @@ impl VamanaImpl {
         l: usize,
         mut rng: impl Rng,
     ) -> Result<(), VamanaError> {
-        self.log.write_all(format!("One pass begin with {}\n", alpha).as_bytes())?;
 
         let mut ids = (0..n).collect::<Vec<_>>();
         ids.shuffle(&mut rng);
